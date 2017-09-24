@@ -1,10 +1,8 @@
-/*
- *  Simple HTTP get webclient test
- */
 
-#define SERIAL Serial
+#include <Arduino.h>
 #include <ESP8266HTTPClient.h>
-#define ESP8266WIFI
+#include "Configuration.h"
+
 #include "LEDHelper.h"
 #include "OTAHelper.h"
 #include "WiFiHelper.h"
@@ -12,32 +10,6 @@
 #include "WemoResponder.h"
 #include "Switch.h"
 #include "Timer.h"
-
-// your wifi ssid
-const char *SSID = "YOUR-WIFI-SSID";
-// your wifi password
-const char *WIFI_PASSWORD = "YOUR-WIFI-PASSWORD";
-
-// uncomment to enable REST push to record data
-// #define ENABLE_ENPOINT_API
-// this is the REST endpoint to push the json object
-const char *ENDPOINT = "http://YOUR-NODE-API-SERVER-IP-ADDRESS/api/motion/";
-// a unique guid for this device
-const char *deviceID = "00000000-0000-0000-0000-000000000000";
-// a unique name for the device
-const char *device = "DEVICE-NAME";
-
-// you set this to a hashed password, then you can push code updates over wifi
-// https://www.md5hashgenerator.com/
-const char *OTA_PASSWORD_HASH = "MD5_HASHED_PASSWORD";
-
-// timeout, in minutes, to stay on after a motion is triggered
-const unsigned long MOTION_TIME_ON = 2;
-// timout, in minutes, to stay on after manually turned on via alexa
-const unsigned long MANUAL_TIME_ON = 5;
-
-#define TRIGGER_PIN 13
-#define PIR_PIN 12
 
 /******* variables / objects used in rest of the sketch *********/
 
@@ -58,10 +30,10 @@ void setup()
     SERIAL.begin(115200);
     pinMode(TRIGGER_PIN, OUTPUT);
     pinMode(PIR_PIN, INPUT);
-
+    
     digitalWrite(TRIGGER_PIN, HIGH);
     ledHelper.init();
-    
+
     ledHelper.lightVisual(ledHelper.COLOR_INIT, currentColor, 500, 2);
     delay(100);
     SERIAL.println("wifi check");
@@ -74,18 +46,21 @@ void setup()
     responder.addDevice(*light);
 }
 
-void lightsOn()
-{
+void lightsOn() {
     SERIAL.println("Manual Override: ON");
     manualTrigger = true;
     shutoffTimer.every_n_minutes(MANUAL_TIME_ON);
 }
 
-void lightsOff()
-{
-    SERIAL.println("Manual Override: OFF");
+void lightsOff() {
+    SERIAL.println("Changed State: OFF");
     manualTrigger = false;
     shutoffTimer.stop();
+    ledHelper.setColor(255, ledHelper.COLOR_OFF);
+
+    #ifdef ENABLE_ENPOINT_API
+        record_data(ENDPOINT, DEVICE_ID, DEVICE_NAME, LOW);
+    #endif
 }
 
 void loop()
@@ -96,31 +71,41 @@ void loop()
 
     delay(1);
     otaHelper.check();
-    int pirState = manualTrigger ? HIGH : digitalRead(PIR_PIN);
+    
+    int realPIRState = digitalRead(PIR_PIN);
+    unsigned long timeout = manualTrigger ? MANUAL_TIME_ON : MOTION_TIME_ON;
+    
+    if(shutoffTimer.isRunning()) {
+        shutoffTimer.check(lightsOff);
+
+        if ( realPIRState == HIGH ) {
+            // reset timer
+            shutoffTimer.every_n_minutes(timeout);
+        }
+    
+    }
+
+    int pirState = manualTrigger || shutoffTimer.isRunning() ? HIGH : realPIRState;
+    
     digitalWrite(TRIGGER_PIN, pirState);
 
-    if (shutoffTimer.isRunning())
-    {
-        shutoffTimer.check(lightsOff);
-    }
-    if (pirState != pirValue)
-    {
-        currentColor = pirState == HIGH ? ledHelper.COLOR_ON : ledHelper.COLOR_OFF;
-        unsigned long timeout = manualTrigger ? MANUAL_TIME_ON : MOTION_TIME_ON;
+    
+    // off only happens after timeout of timer
+    if (pirValue != pirState && pirState == HIGH) {
+        SERIAL.println("Changed State: ON");
         shutoffTimer.every_n_minutes(timeout);
-        ledHelper.setColor(255, currentColor);
-
-        SERIAL.print("Changed State: ");
-        SERIAL.println(pirState);
+        ledHelper.setColor(255, ledHelper.COLOR_ON);
         pirValue = pirState;
-#ifdef ENABLE_ENPOINT_API
-        record_data(ENDPOINT, DEVICE_ID, DEVICE_NAME, pirState);
-#endif
+
+        #ifdef ENABLE_ENPOINT_API
+            record_data(ENDPOINT, DEVICE_ID, DEVICE_NAME, pirState);
+        #endif
+    } else if (pirValue != pirState && pirState == LOW) {
+        pirValue = pirState;
     }
 }
 
-void record_data(const char *endpoint, const char *deviceId, const char *deviceName, int state)
-{
+void record_data(const char* endpoint, const char* deviceId, const char* deviceName, int state) {
 #ifdef ESP8266WIFI
     HTTPClient http;
     String active = state == HIGH ? "true" : "false";
@@ -132,21 +117,15 @@ void record_data(const char *endpoint, const char *deviceId, const char *deviceN
     http.GET();
     http.writeToStream(&SERIAL);
 
-    if (httpCode > 0)
-    {
+    if (httpCode > 0) {
         // file found at server
-        if (httpCode != HTTP_CODE_CREATED)
-        {
+        if (httpCode != HTTP_CODE_CREATED) {
             SERIAL.printf("[HTTP] POST failed, error: %s\n", http.errorToString(httpCode).c_str());
             ledHelper.lightVisual(ledHelper.COLOR_HTTP_ERROR, currentColor, 100, 3);
-        }
-        else
-        {
+        } else {
             SERIAL.printf("[HTTP] POST: %i\n", httpCode);
         }
-    }
-    else
-    {
+    } else {
         SERIAL.printf("[HTTP] POST failed, error: %s\n", http.errorToString(httpCode).c_str());
         ledHelper.lightVisual(ledHelper.COLOR_HTTP_ERROR, currentColor, 100, 3);
     }
